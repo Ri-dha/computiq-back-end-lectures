@@ -1,0 +1,5 @@
+# The venv folder never gets committed — requirements.txt travels instead.
+venv/
+__pycache__/
+*.pyc
+.env
