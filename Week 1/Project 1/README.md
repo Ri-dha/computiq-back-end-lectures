@@ -97,17 +97,85 @@ With the venv **active**, install the three packages this project needs:
 pip install fastapi uvicorn sqlmodel
 ```
 
-- **fastapi** — the framework. It's what lets you define what your app does. Week 2 is entirely about this.
-- **uvicorn** — the server that actually runs your app and speaks HTTP to the outside world. FastAPI needs both.
-- **sqlmodel** — talks to a database from Python code. This is Week 3's tool; you're getting an early look.
+Three packages, three completely different jobs. Knowing which one does what is worth five minutes now, because when something breaks later, the error almost always comes from exactly one of them.
 
-See what landed:
+### fastapi — describes your API
+
+FastAPI is where you say **what your app does**: which URLs exist, which HTTP method each one answers, and what comes back.
+
+```python
+@app.get("/tasks")        # "when someone sends GET /tasks, run this function"
+def list_tasks():
+    return [...]
+```
+
+That's the core idea. You write ordinary Python functions; FastAPI's job is connecting each one to a URL. You'll write five of these in Part 8.
+
+Two things it also does for free, which is most of the reason this course uses it:
+
+- **Validation.** You declare the shape of your data once, and FastAPI checks every incoming request against it. Send a task with a number where the title should be, and it's rejected with a `422` before your function ever runs — you don't write that check.
+- **Documentation.** The `/docs` page you'll open in Part 5 is generated from your code. It cannot drift out of date, because there's nothing separate to update.
+
+What FastAPI does **not** do is touch the network. It doesn't know what a port is and can't receive a request on its own. It's a library that sits there waiting to be called. That's what the next package is for.
+
+*Week 2 is entirely about this package.*
+
+### uvicorn — actually runs it
+
+Remember the definition of a server from Lecture 1: *a running program that listens on a network port for requests and sends back responses.* **That program is uvicorn**, not FastAPI.
+
+When a request arrives, uvicorn:
+
+1. is listening on port 8000 and accepts the connection,
+2. reads the raw HTTP text off the wire and turns it into something Python can work with,
+3. hands it to your FastAPI app and gets your function's return value back,
+4. turns that into a proper HTTP response — status line, headers, JSON body — and sends it.
+
+FastAPI decides *what the answer is*. Uvicorn handles *everything about getting the question in and the answer out*. You can see the handoff in the command itself:
+
+```bash
+uvicorn main:app
+```
+
+You are handing uvicorn your `app` object and saying "run this." The two are separate on purpose: they talk through an agreed interface called **ASGI**, so you could swap uvicorn for a different ASGI server in production without changing a line of your own code. That's vocabulary to recognize, nothing you need to act on.
+
+### sqlmodel — talks to the database
+
+Databases speak SQL; your program speaks Python. Something has to sit in the middle. Without SQLModel you'd be writing SQL strings by hand and unpacking raw rows into dictionaries yourself:
+
+```python
+# What you'd otherwise write:
+cursor.execute("INSERT INTO task (title, done) VALUES (?, ?)", (title, done))
+```
+
+With SQLModel you define one Python class and get both the database table and the JSON shape of your API from it — which is exactly what you'll do in Part 7. A tool that maps objects to database rows like this is called an **ORM** (Object-Relational Mapper).
+
+SQLModel is built on top of two libraries you'll see in your install:
+
+- **SQLAlchemy** — the long-established Python database toolkit. It generates the actual SQL and manages connections. SQLModel is a friendlier layer over it.
+- **Pydantic** — the validation library FastAPI already uses for the checking described above.
+
+That combination is the point: the *same* class can be a database table and a validated API model, because it's built on the tool for each. SQLModel was written by the same author as FastAPI, specifically to fit it.
+
+*Week 3 is where this gets taught properly; you're getting an early look.*
+
+### Confirm what landed
 
 ```bash
 pip list
 ```
 
-You'll see more than three packages. The extras are dependencies — packages your packages needed. That's normal and you don't have to care about them.
+You'll see more than three packages. The extras are dependencies — packages your packages needed. `SQLAlchemy` and `pydantic` are the two just described, pulled in automatically by SQLModel; the rest belong to FastAPI and uvicorn. You don't install these yourself and you don't need to think about them.
+
+A quick recap of the three you did install:
+
+| Package | Its job | If it's missing, you'll see |
+|---------|---------|----------------------------|
+| `fastapi` | defines your endpoints and validates data | `ModuleNotFoundError: No module named 'fastapi'` |
+| `uvicorn` | listens on the port and runs your app | `uvicorn: command not found` |
+| `sqlmodel` | maps Python classes to database tables | `ModuleNotFoundError: No module named 'sqlmodel'` |
+
+All three of those errors mean the same thing nine times out of ten: **the venv isn't active.** See Troubleshooting.
 
 **Checkpoint:** `pip list` includes `fastapi`, `uvicorn`, and `sqlmodel`.
 
@@ -303,7 +371,7 @@ async def lifespan(app: FastAPI):
     create_db_and_tables()
     yield
 
-fdfdfdfd
+
 app = FastAPI(title="Task API", lifespan=lifespan)
 app.include_router(router)
 
