@@ -255,6 +255,37 @@ Open **http://127.0.0.1:8000** — your JSON message. You are running a server: 
 
 Now open **http://127.0.0.1:8000/docs** — FastAPI built an interactive documentation page for your endpoint, for free. You'll use this constantly in Part 9.
 
+### Running on a different port
+
+There is nothing special about 8000 — it's just uvicorn's default. Pick another with `--port`:
+
+```bash
+uvicorn main:app --reload --port 8001
+```
+
+**The URL has to change to match.** Your app is now at `http://127.0.0.1:8001` and `http://127.0.0.1:8001/docs`; the old address stops working entirely. This catches people out constantly — they change the port, then keep refreshing the old tab and conclude the server is broken.
+
+Don't guess which port you're on. Uvicorn prints it on startup, and that line is the authority:
+
+```
+INFO:     Uvicorn running on http://127.0.0.1:8001 (Press CTRL+C to quit)
+```
+
+Two reasons you'll actually need this:
+
+- **Something else already has port 8000.** Uvicorn refuses to start and says so:
+
+  ```
+  ERROR:    [Errno 48] error while attempting to bind on address ('127.0.0.1', 8000): address already in use
+  ```
+
+  Usually a server you forgot in another terminal. Either stop that one with `Ctrl+C`, or just move to a free port. (The error number is OS-specific — 48 on macOS, 98 on Linux, 10048 on Windows — but the wording is the same.)
+- **You want two projects running at once** — this one on 8000, another on 8001. Each server needs its own port; two programs cannot listen on the same one.
+
+Any number between 1024 and 65535 is fair game. Below 1024 needs admin rights on macOS and Linux, so avoid those.
+
+> **Also worth knowing:** by default the server accepts connections only from your own machine. Adding `--host 0.0.0.0` lets other devices on your network reach it — useful for testing from your phone, but it does expose the app to everyone on that network. Use it deliberately, not by habit.
+
 Leave the server running in this terminal. Open a **second terminal** for the remaining commands (activate the venv there too). Stop a server with `Ctrl+C`.
 
 **Checkpoint:** both URLs load — JSON at `/`, an interactive page at `/docs`.
@@ -468,7 +499,7 @@ def delete_task(task_id: int, session: Session = Depends(get_session)):
 
 **Delete.** Fetch, `session.delete`, `commit`. The function returns nothing at all, and `status_code=204` means "No Content" — success, with an empty body. There's genuinely nothing to send back after a deletion.
 
-> **An honest simplification.** Using the `Task` model directly as the request body means a client could send its own `id` and overwrite yours. Real projects define separate models for input and output — `TaskCreate`, `TaskUpdate`, `TaskPublic`. We're using one model here to keep the moving parts down. Week 2 covers the split properly; when it does, this is the reason it exists.
+> **An honest simplification.** Using the `Task` model directly as the request body means a client could send its own `id` and overwrite yours. Real projects define separate models for input and output — `TaskCreate`, `TaskUpdate`, `TaskPublic`. We're using one model here to keep the moving parts down, so Part 9 gets you to a running API as fast as possible. **Part 11 fixes it properly** — and shows you the specific bug this version lets through.
 
 **Checkpoint:** all four files saved, no typos.
 
@@ -542,25 +573,393 @@ Delete `tasks.db` and restart, and you're back to an empty database with the tab
 
 ---
 
-## Part 10 — What you just copied, and when you'll understand it
+## Part 10 — Routing: how a request finds your function
+
+> **Parts 10–13 upgrade what you already have.** You have a working API — don't throw it away. These four parts replace `app/models.py` and `app/routes.py` with better versions and explain every change. Keep the server running with `--reload` and watch each step take effect.
+
+Routing is the question "a request just arrived — which function do I call?" You answer it with a decorator:
+
+```python
+@router.get("/tasks/{task_id}")
+```
+
+That single line is a **method** (`get`) plus a **path** (`/tasks/{task_id}`). Together they identify one route. `GET /tasks` and `POST /tasks` share a path but are two entirely separate routes, because the method differs.
+
+### Two ways to put data in a URL
+
+You've used one already. Here is the other.
+
+**Path parameters** name *which* thing you want. They're part of the path, in curly braces:
+
+```python
+@router.get("/tasks/{task_id}")
+def get_task(task_id: int, session: Session = Depends(get_session)):
+    ...
+```
+
+The name in `{}` matches the function parameter. Nothing else connects them.
+
+**Query parameters** are everything after the `?`, and they usually *modify* a request rather than identify a thing — filters, sorting, paging. Here's the rule that surprises everyone:
+
+> **A parameter is a query parameter simply because its name is *not* in the path.** There's no different decorator and no extra syntax. FastAPI checks the path string; anything left over is a query parameter.
+
+Give `list_tasks` three of them:
+
+```python
+@router.get("/tasks", response_model=list[TaskPublic])
+def list_tasks(
+    done: bool | None = None,
+    skip: int = 0,
+    limit: int = 10,
+    session: Session = Depends(get_session),
+):
+    query = select(Task)
+    if done is not None:
+        query = query.where(Task.done == done)
+    return session.exec(query.offset(skip).limit(limit)).all()
+```
+
+Every one has a default, which is exactly what makes them optional — `GET /tasks` still works untouched. Now these work too:
+
+```bash
+curl "http://127.0.0.1:8000/tasks?done=true"
+```
+
+```bash
+curl "http://127.0.0.1:8000/tasks?skip=1&limit=2"
+```
+
+`.where()`, `.offset()` and `.limit()` build the filtering into the SQL itself. With `echo=True` on, watch your terminal — the `SELECT` statement changes as you change the URL. You are not filtering in Python; the database is doing it.
+
+### A required query parameter
+
+Leave the default off and the parameter becomes required. Add a search route:
+
+```python
+@router.get("/tasks/search", response_model=list[TaskPublic])
+def search_tasks(q: str, session: Session = Depends(get_session)):
+    query = select(Task).where(Task.title.contains(q))
+    return session.exec(query).all()
+```
+
+`q` has no default, so `GET /tasks/search` with no `?q=` returns a 422 automatically.
+
+### The ordering rule — the one that will bite you
+
+**Put that search route *above* `get_task` in the file.** Here's why.
+
+FastAPI matches routes top to bottom and the first match wins. `/tasks/{task_id}` matches *any* single segment after `/tasks/` — including the literal word `search`. Declare it first and `/tasks/search` never runs; FastAPI tries to read `"search"` as an `int`, fails, and returns 422 forever.
+
+> **The rule: specific, static paths go above dynamic ones that share their prefix.** `/tasks/search` before `/tasks/{task_id}`, always.
+
+Try it wrong on purpose — swap the two, call `/tasks/search?q=co`, read the 422, then swap them back. Two minutes, and you'll never lose an afternoon to it later.
+
+**Checkpoint:** `?done=true` filters the list, and `/tasks/search?q=co` returns matches rather than a 422.
+
+---
+
+## Part 11 — Requests: what the client is allowed to send
+
+Data reaches your function three ways, and now you've used all of them:
+
+| Where | Looks like | Used for |
+|---|---|---|
+| Path parameter | `/tasks/3` | *which* resource |
+| Query parameter | `/tasks?done=true` | filtering, paging, options |
+| Request body | JSON sent with POST/PUT/PATCH | the actual content |
+
+`GET` and `DELETE` carry no body — everything they need fits in the URL. `POST`, `PUT` and `PATCH` do, and that body is where validation matters most.
+
+### The problem with using one model
+
+Right now `Task` is doing three jobs: database table, request body, and response. Those three want different shapes:
+
+- A client **must not** set `id` — the database assigns it.
+- A client **must not** see internal fields.
+- A `PATCH` needs every field optional; a `POST` does not.
+
+One class cannot be all three. So split it.
+
+### The split — replace `app/models.py` entirely
+
+```python
+from sqlmodel import Field, SQLModel
+
+
+class TaskBase(SQLModel):
+    """The fields that everything shares."""
+    title: str = Field(min_length=1, max_length=100)
+    done: bool = False
+    priority: int = Field(default=3, ge=1, le=5)
+
+
+class Task(TaskBase, table=True):
+    """The database table. Only this one has table=True."""
+    id: int | None = Field(default=None, primary_key=True)
+    internal_note: str = ""
+
+
+class TaskCreate(TaskBase):
+    """What a client may send to POST and PUT."""
+    pass
+
+
+class TaskUpdate(SQLModel):
+    """What a client may send to PATCH — every field optional."""
+    title: str | None = Field(default=None, min_length=1, max_length=100)
+    done: bool | None = Field(default=None)
+    priority: int | None = Field(default=None, ge=1, le=5)
+
+
+class TaskPublic(TaskBase):
+    """What the client is allowed to see."""
+    id: int
+```
+
+Five classes, but only one new idea: `TaskBase` holds the common fields and the others inherit from it — the same inheritance from Week 1, Lecture 2, doing real work. `Task` adds `id` and `internal_note`; `TaskPublic` adds `id` but *not* `internal_note`.
+
+### Why this split isn't optional
+
+Here is the part that actually matters, and it's specific to SQLModel:
+
+> **A model with `table=True` does not validate its data.** Constraints on `Task` are ignored at runtime. Constraints on `TaskCreate` are enforced.
+
+Prove it to yourself. With the venv active, run `python` and paste:
+
+```python
+from app.models import Task, TaskCreate
+
+TaskCreate(title="", priority=99)   # ValidationError — rejected
+Task(title="", priority=99)         # accepted, no complaint at all
+```
+
+The second line builds a completely invalid task and SQLModel says nothing. That's why the request body must be `TaskCreate` and never `Task`. In Part 8's version, the body *was* `Task` — which is exactly the bug that callout warned you about.
+
+### PATCH — updating one field
+
+`PUT` replaces the whole task, so the client must send every field. `PATCH` changes only what's provided:
+
+```python
+@router.patch("/tasks/{task_id}", response_model=TaskPublic)
+def patch_task(task_id: int, new_data: TaskUpdate, session: Session = Depends(get_session)):
+    task = session.get(Task, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    updates = new_data.model_dump(exclude_unset=True)
+    for field, value in updates.items():
+        setattr(task, field, value)
+
+    session.add(task)
+    session.commit()
+    session.refresh(task)
+    return task
+```
+
+`exclude_unset=True` is the whole trick: it returns only the fields the client actually sent. Without it, every omitted field would come back as `None` and you'd wipe the task's title by trying to tick its checkbox.
+
+```bash
+curl -X PATCH http://127.0.0.1:8000/tasks/2 -H "Content-Type: application/json" -d '{"done": true}'
+```
+
+The title and priority come back unchanged.
+
+**Checkpoint:** `Task(title="")` is accepted in the Python shell while `TaskCreate(title="")` raises, and `PATCH` with only `{"done": true}` leaves the other fields alone.
+
+---
+
+## Part 12 — Responses: what the client is allowed to see
+
+`response_model` shapes what goes *out*, independently of what your function returns. Your routes already return whole `Task` objects — including `internal_note`. Declaring `response_model=TaskPublic` strips anything not on `TaskPublic` before it leaves the building.
+
+Here is the complete `app/routes.py`. Every route now declares both a `response_model` and, where it isn't 200, a `status_code`:
+
+```python
+from fastapi import APIRouter, Depends, HTTPException
+from sqlmodel import Session, select
+
+from app.database import get_session
+from app.models import Task, TaskCreate, TaskPublic, TaskUpdate
+
+router = APIRouter()
+
+
+@router.post("/tasks", response_model=TaskPublic, status_code=201)
+def create_task(new_task: TaskCreate, session: Session = Depends(get_session)):
+    task = Task.model_validate(new_task)
+    session.add(task)
+    session.commit()
+    session.refresh(task)
+    return task
+
+
+@router.get("/tasks", response_model=list[TaskPublic])
+def list_tasks(
+    done: bool | None = None,
+    skip: int = 0,
+    limit: int = 10,
+    session: Session = Depends(get_session),
+):
+    query = select(Task)
+    if done is not None:
+        query = query.where(Task.done == done)
+    return session.exec(query.offset(skip).limit(limit)).all()
+
+
+# Static path FIRST -- see the ordering rule in Part 10.
+@router.get("/tasks/search", response_model=list[TaskPublic])
+def search_tasks(q: str, session: Session = Depends(get_session)):
+    query = select(Task).where(Task.title.contains(q))
+    return session.exec(query).all()
+
+
+@router.get("/tasks/{task_id}", response_model=TaskPublic)
+def get_task(task_id: int, session: Session = Depends(get_session)):
+    task = session.get(Task, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return task
+
+
+@router.put("/tasks/{task_id}", response_model=TaskPublic)
+def update_task(task_id: int, new_data: TaskCreate, session: Session = Depends(get_session)):
+    task = session.get(Task, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    task.title = new_data.title
+    task.done = new_data.done
+    task.priority = new_data.priority
+    session.add(task)
+    session.commit()
+    session.refresh(task)
+    return task
+
+
+@router.patch("/tasks/{task_id}", response_model=TaskPublic)
+def patch_task(task_id: int, new_data: TaskUpdate, session: Session = Depends(get_session)):
+    task = session.get(Task, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    updates = new_data.model_dump(exclude_unset=True)
+    for field, value in updates.items():
+        setattr(task, field, value)
+    session.add(task)
+    session.commit()
+    session.refresh(task)
+    return task
+
+
+@router.delete("/tasks/{task_id}", status_code=204)
+def delete_task(task_id: int, session: Session = Depends(get_session)):
+    task = session.get(Task, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    session.delete(task)
+    session.commit()
+```
+
+One line is new and worth naming: `Task.model_validate(new_task)` converts the validated `TaskCreate` into a `Task` the database can store. The client's data has already been checked by this point; this just moves it into the table's shape.
+
+### Status codes, and why each one
+
+| Route | Code | Because |
+|---|---|---|
+| `POST /tasks` | **201** Created | something new exists that didn't before |
+| `GET`, `PUT`, `PATCH` | **200** OK | here is the thing you asked for |
+| `DELETE` | **204** No Content | it worked, and there's nothing left to describe |
+| bad shape or type | **422** | the request never made sense |
+| no such task | **404** | the request made sense; the task doesn't exist |
+
+**Checkpoint:** no response anywhere contains `internal_note`, and `POST` answers 201 rather than 200.
+
+---
+
+## Part 13 — Validation: two kinds of error
+
+Look back at `models.py`. There is not one `if` statement checking user input — and yet an empty title is impossible. That's `Field()`:
+
+```python
+title: str = Field(min_length=1, max_length=100)
+priority: int = Field(default=3, ge=1, le=5)
+```
+
+`ge` is greater-or-equal, `le` is less-or-equal. Break any of them and FastAPI answers 422 before your function's first line runs.
+
+### Reading a 422
+
+```bash
+curl -X POST http://127.0.0.1:8000/tasks -H "Content-Type: application/json" -d '{"title": "Nope", "priority": 10}'
+```
+
+```json
+{
+  "detail": [
+    {
+      "type": "less_than_equal",
+      "loc": ["body", "priority"],
+      "msg": "Input should be less than or equal to 5",
+      "input": 10
+    }
+  ]
+}
+```
+
+**Read `loc` first.** It names exactly where the problem is: `["body", "priority"]` means the `priority` field of the request body. You'll see `["query", "q"]` for a missing search term and `["path", "task_id"]` for `/tasks/abc`. `msg` then tells you what rule broke.
+
+### 422 or 404? They come from opposite places
+
+This distinction confuses nearly everyone, and it's simple once stated:
+
+- **422 — nobody wrote it.** The request's shape or type was wrong, so Pydantic rejected it at the door. Nothing was looked up; your function never ran.
+- **404 — you wrote it.** `raise HTTPException(status_code=404, ...)` is a decision your code made after checking a rule Pydantic cannot know: *does task 999 exist?*
+
+`GET /tasks/abc` gives 422 because `abc` can never be a task id. `GET /tasks/999` gives 404 because `999` is a perfectly valid id that happens to match nothing. **You have to get past validation to earn a 404.**
+
+### A trap worth stepping in once
+
+Constraints do **not** follow a class around. `TaskUpdate` doesn't inherit from `TaskBase`, so it needs its own copy of every rule. Delete the constraints from `TaskUpdate` and try:
+
+```bash
+curl -X PATCH http://127.0.0.1:8000/tasks/2 -H "Content-Type: application/json" -d '{"priority": 99}'
+```
+
+You get **500 Internal Server Error**, not 422. The chain: `TaskUpdate` accepts 99 → `Task` is a table model, so it doesn't validate either → 99 goes into the database → `TaskPublic` *does* have `le=5`, so FastAPI can't build the response and raises `ResponseValidationError`.
+
+A 500 always means your code broke, never that the client sent something bad. Seeing one here is a reliable sign a constraint is missing on an input model. Put them back.
+
+**Checkpoint:** an empty title and `priority: 10` both return 422 with a readable `loc`, and `/tasks/999` returns 404.
+
+---
+
+## Part 14 — What you just copied, and when you'll understand it
 
 Plenty here you typed without fully understanding. That was the plan. Here's the map:
 
+Some of it you've now covered:
+
+| What you used | Where it was explained |
+|---|---|
+| `class Task(...)` — classes, inheritance | Week 1, Lecture 2 |
+| Routing, path and query parameters | Part 10 |
+| Request bodies, input vs. output models | Part 11 |
+| `response_model` and status codes | Part 12 |
+| `Field()` constraints, 422 vs. 404 | Part 13 |
+
+And some is still ahead:
+
 | What you used | When it gets explained |
 |---|---|
-| `class Task(...)` — classes and objects | Week 1, Lecture 2 |
-| `@app.get(...)`, `@router.post(...)` — decorators | Week 2 |
-| `{task_id}` in a path, and typed function parameters | Week 2 |
-| `title: str` validation, request vs. response models | Week 2 |
+| `@app.get(...)` — how decorators actually work | Week 2 |
 | `Depends()` — dependency injection | Week 2 |
-| `SQLModel`, engines, sessions, `select()` | Week 3 |
-| Automated tests for all five endpoints | Week 3 |
+| Nested models, enums, custom validators | Week 2, Lecture 2 |
+| `SQLModel` internals, engines, sessions, `select()` | Week 3 |
+| Automated tests for all seven endpoints | Week 3 |
 | `async` / `await` and `@asynccontextmanager` | Week 4 |
 | Linting and formatting this code | Week 4 |
 
 Keep `project-1/`. You'll come back to it.
 
-**If you want to push further:** add a `created_at` timestamp to `Task` using the built-in `datetime` module; add `PATCH /tasks/{id}` that updates only `done`; or add `GET /tasks?done=true` to filter the list. All three are genuinely doable with what's above plus the FastAPI docs.
+**If you want to push further:** add a `created_at` timestamp using the built-in `datetime` module; add `?sort=priority` to the list route; return a proper 409 when someone creates a task whose title already exists; or make `/tasks/search` case-insensitive and search descriptions too. All four are doable with what's above plus the FastAPI docs.
 
 ---
 
@@ -582,11 +981,12 @@ Your venv isn't active. Look at your prompt — no `(venv)`, that's the problem.
 **`uvicorn: command not found`**
 Same cause: either the venv isn't active, or you installed the packages before activating it. Activate, re-run `pip install fastapi uvicorn sqlmodel`.
 
-**`ERROR: [Errno 48] Address already in use`**
-A server is already running on port 8000 — probably one you forgot in another terminal. Find and `Ctrl+C` it, or run on a different port:
+**`ERROR: [Errno 48] error while attempting to bind on address ... address already in use`**
+A server is already running on that port — probably one you forgot in another terminal. Find and `Ctrl+C` it, or run on a different port:
 ```bash
 uvicorn main:app --reload --port 8001
 ```
+Then use `http://127.0.0.1:8001` for everything that follows. See "Running on a different port" in Part 5.
 
 **`ModuleNotFoundError: No module named 'app'`**
 Run `uvicorn` from the `project-1` folder itself, not from inside `app/`. Check with `pwd`.
@@ -599,3 +999,12 @@ You left off `--reload`. Stop the server and restart it with the flag.
 
 **`TypeError: unsupported operand type(s) for |`**
 Your Python is older than 3.10, which is where `int | None` syntax arrived. Check `python --version` and upgrade.
+
+**`/tasks/search` returns 422 instead of results**
+`GET /tasks/{task_id}` is declared above it, so `"search"` is being read as a task id. Move the search route above it — the ordering rule in Part 10.
+
+**`500 Internal Server Error` after a PATCH or PUT**
+Almost always a missing constraint on an input model, letting a bad value reach the database that `TaskPublic` then refuses to serialize. Check that `TaskUpdate` carries the same `Field(...)` rules as `TaskBase`. See the end of Part 13.
+
+**Every field comes back `null` after a PATCH**
+You dropped `exclude_unset=True` from `model_dump()`, so unsent fields were treated as explicit `None` and overwrote real data. Part 11 has the working version.

@@ -7,6 +7,8 @@ A deliberately small CRUD backend. It exists to make two slides concrete:
 
 There is **no database**. Data lives in a Python dictionary and disappears when you stop the server — that is Week 3's job.
 
+> **If a student has already worked through `Project 1`,** they've added SQLite to a Task API ahead of the syllabus and will notice the contradiction. Both are true: Week 3 is where databases are *taught*, and Project 1 is an optional self-guided preview that hands them the code without the theory. Worth naming out loud if it comes up, rather than letting it read as an inconsistency.
+
 ---
 
 ## Running it
@@ -95,7 +97,7 @@ Option 2 is the stronger placement — it lands right after students have built 
 
 **Two questions students reliably ask:**
 
-- *"Where did the data go?"* — It was in memory. Restarting the server wipes it. This is the honest motivation for Week 3.
+- *"Where did the data go?"* — It was in memory. Restarting the server wipes it. This is the honest motivation for Week 3. If someone answers their own question with "I already fixed that in Project 1," let them say how — a student explaining `tasks.db` to the room is worth more than you explaining it.
 - *"Why so many folders for five functions?"* — Because it isn't five functions for long. Show them `task_store.py` and ask what would have to change to swap in a real database. The answer — "only this file" — is the whole argument for layering.
 
 **If you are running short on time**, skip this demo entirely. It reinforces; it doesn't introduce anything the objectives depend on.
